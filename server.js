@@ -364,6 +364,79 @@ async function getGithubInfo() {
     return info;
 }
 
+async function getGitConfigValue(key) {
+    try {
+        return (await git(["config", "--get", key], 10000)).stdout.trim();
+    } catch (error) {
+        return "";
+    }
+}
+
+function missingGitIdentityMessage() {
+    return [
+        "Git author identity is missing.",
+        "Log in with GitHub in the admin panel, then try again so the panel can set user.name and user.email for this repo only.",
+        "If you want to set it manually instead, run git config user.name \"Your Name\" and git config user.email \"you@example.com\" inside the cloned repo.",
+    ].join(" ");
+}
+
+function isMissingGitIdentityError(error) {
+    const result = error && error.result ? error.result : {};
+    const message = [
+        error && error.message ? error.message : "",
+        result.stdout || "",
+        result.stderr || "",
+    ].join("\n");
+
+    return /Author identity unknown|unable to auto-detect email address/i.test(message);
+}
+
+async function getGithubUserId() {
+    try {
+        return (await gh(["api", "user", "--jq", ".id"], 15000)).stdout.trim();
+    } catch (error) {
+        return "";
+    }
+}
+
+async function ensureGitIdentity() {
+    const configuredName = await getGitConfigValue("user.name");
+    const configuredEmail = await getGitConfigValue("user.email");
+
+    if (configuredName && configuredEmail) {
+        return {
+            configured: false,
+            name: configuredName,
+            email: configuredEmail,
+        };
+    }
+
+    const github = await getGithubInfo();
+    if (!github.available || !github.authenticated || !github.user) {
+        throw new Error(missingGitIdentityMessage());
+    }
+
+    const githubId = await getGithubUserId();
+    const fallbackName = github.user;
+    const fallbackEmail = githubId
+        ? `${githubId}+${github.user}@users.noreply.github.com`
+        : `${github.user}@users.noreply.github.com`;
+    const name = configuredName || fallbackName;
+    const email = configuredEmail || fallbackEmail;
+
+    if (!configuredName) {
+        await git(["config", "user.name", name]);
+    }
+    if (!configuredEmail) {
+        await git(["config", "user.email", email]);
+    }
+
+    return {
+        configured: true,
+        name,
+        email,
+    };
+}
 async function getGitInfo() {
     const info = {
         available: false,
@@ -582,10 +655,27 @@ async function commitData(body) {
         };
     }
 
-    const commit = await git(["commit", "-m", message], 60000);
+    const identity = await ensureGitIdentity();
+
+    let commit;
+    try {
+        commit = await git(["commit", "-m", message], 60000);
+    } catch (error) {
+        if (isMissingGitIdentityError(error)) {
+            throw new Error(missingGitIdentityMessage());
+        }
+        throw error;
+    }
+
+    const identityOutput = identity.configured
+        ? `Configured Git author as ${identity.name} <${identity.email}> for this repo.`
+        : "";
+
     return {
         committed: true,
-        output: [commit.stdout, commit.stderr].filter(Boolean).join("\n"),
+        output: [identityOutput, commit.stdout, commit.stderr]
+            .filter(Boolean)
+            .join("\n"),
         git: await getGitInfo(),
         github: await getGithubInfo(),
     };
