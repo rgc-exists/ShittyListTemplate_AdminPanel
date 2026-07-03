@@ -1,0 +1,14 @@
+{
+  "name": "shitty-list-template-admin-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local admin panel for editing Shitty List template data and committing JSON changes.",
+  "scripts": {
+    "install:windows": "powershell -ExecutionPolicy Bypass -File ./install-windows.ps1",
+    "install:linux": "bash ./install-linux.sh",
+    "start": "node server.js",
+    "run:windows": "powershell -ExecutionPolicy Bypass -File ./run-windows.ps1",
+    "run:linux": "bash ./run-linux.sh",
+    "check": "node --check server.js && node --check public/app.js"
+  }
+}
