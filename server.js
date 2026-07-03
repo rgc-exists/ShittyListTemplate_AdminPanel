@@ -111,6 +111,30 @@ async function writeJson(filePath, value) {
     await fs.writeFile(filePath, `${JSON.stringify(value, null, 4)}\n`, "utf8");
 }
 
+
+function existingDataFileNames(fileNames, fallbackFileName) {
+    const existing = fileNames.filter((fileName) =>
+        fsSync.existsSync(safeDataPath(fileName)),
+    );
+
+    return existing.length > 0 ? existing : [fallbackFileName];
+}
+async function readFirstJson(fileNames) {
+    const errors = [];
+
+    for (const fileName of fileNames) {
+        try {
+            return {
+                fileName,
+                value: await readJson(safeDataPath(fileName)),
+            };
+        } catch (error) {
+            errors.push(`${fileName}: ${error.message}`);
+        }
+    }
+
+    throw new Error(errors.join("; "));
+}
 function defaultLevel(slug) {
     return {
         id: "",
@@ -403,24 +427,24 @@ async function readState() {
         repoError: "",
     };
 
-    const listPath = safeDataPath("_list.json");
-    const editorsPath = safeDataPath("_editors.json");
     let list;
+    let listFileName = "_list.json";
 
     try {
-        list = await readJson(listPath);
+        const result = await readFirstJson(["_list.json", "list.json"]);
+        list = result.value;
+        listFileName = result.fileName;
     } catch (error) {
         return {
             ...baseState,
-            repoError: `Failed to read data/_list.json: ${error.message}`,
+            repoError: `Failed to read data/_list.json or data/list.json: ${error.message}`,
         };
     }
 
     if (!Array.isArray(list)) {
         return {
             ...baseState,
-            repoError:
-                "data/_list.json must contain an array of level file names.",
+            repoError: `data/${listFileName} must contain an array of level file names.`,
         };
     }
 
@@ -442,7 +466,8 @@ async function readState() {
 
     let editors = [];
     try {
-        editors = normalizeEditors(await readJson(editorsPath));
+        const result = await readFirstJson(["_editors.json", "editors.json"]);
+        editors = normalizeEditors(result.value);
     } catch (error) {
         editors = [];
     }
@@ -510,8 +535,12 @@ async function saveState(body) {
         }
     }
 
-    await writeJson(safeDataPath("_list.json"), list);
-    await writeJson(safeDataPath("_editors.json"), editors);
+    for (const fileName of existingDataFileNames(["_list.json", "list.json"], "_list.json")) {
+        await writeJson(safeDataPath(fileName), list);
+    }
+    for (const fileName of existingDataFileNames(["_editors.json", "editors.json"], "_editors.json")) {
+        await writeJson(safeDataPath(fileName), editors);
+    }
     for (const level of cleanLevels) {
         await writeJson(safeDataPath(`${level.slug}.json`), level.data);
     }

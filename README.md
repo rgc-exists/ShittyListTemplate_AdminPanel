@@ -50,7 +50,7 @@ You can also use npm helpers:
 npm start
 ```
 
-By default the panel targets `./VopracioDemonList`, which is ignored by Git for local repo clones. To point it at another template repo:
+By default the panel targets `./VopracioDemonList`, as  that is the list this was originally made for. It is ignored by Git for local repo clones. There is an option to point it to another repo in the panel UI. To manually point it at another template repo:
 
 ```powershell
 .\run-windows.ps1 -Repo "E:\path\to\template-repo"
