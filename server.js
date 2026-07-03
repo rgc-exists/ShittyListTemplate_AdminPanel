@@ -692,7 +692,191 @@ function commandErrorOutput(error) {
         .join("\n");
 }
 
-async function pullLatestForSelectedRepo(leadingOutput) {
+
+function outputFromResult(result) {
+    return result ? [result.stdout, result.stderr].filter(Boolean).join("\n") : "";
+}
+
+function normalizeListIndex(items, label) {
+    if (!Array.isArray(items)) {
+        throw new Error(`${label} is not a JSON array.`);
+    }
+
+    const seen = new Set();
+    const output = [];
+    for (const item of items) {
+        const slug = validateSlug(String(item), `${label} level file name`);
+        const key = slug.toLowerCase();
+        if (!seen.has(key)) {
+            seen.add(key);
+            output.push(slug);
+        }
+    }
+
+    return output;
+}
+
+function listIndexKey(slug) {
+    return String(slug).toLowerCase();
+}
+
+function listIndexOf(list, slug) {
+    const key = listIndexKey(slug);
+    return list.findIndex((item) => listIndexKey(item) === key);
+}
+
+function listHasSlug(list, slug) {
+    return listIndexOf(list, slug) !== -1;
+}
+
+function insertMissingListItems(preferred, other) {
+    const merged = [...preferred];
+
+    for (let index = 0; index < other.length; index += 1) {
+        const slug = other[index];
+        if (listHasSlug(merged, slug)) {
+            continue;
+        }
+
+        let insertAt = merged.length;
+        for (let previous = index - 1; previous >= 0; previous -= 1) {
+            const previousIndex = listIndexOf(merged, other[previous]);
+            if (previousIndex !== -1) {
+                insertAt = previousIndex + 1;
+                break;
+            }
+        }
+
+        if (insertAt === merged.length) {
+            for (let next = index + 1; next < other.length; next += 1) {
+                const nextIndex = listIndexOf(merged, other[next]);
+                if (nextIndex !== -1) {
+                    insertAt = nextIndex;
+                    break;
+                }
+            }
+        }
+
+        merged.splice(insertAt, 0, slug);
+    }
+
+    return merged;
+}
+
+function mergeListIndexes(baseRaw, upstreamRaw, localRaw) {
+    const base = normalizeListIndex(baseRaw || [], "base list index");
+    const upstream = normalizeListIndex(upstreamRaw || [], "remote list index");
+    const local = normalizeListIndex(localRaw || [], "local list index");
+    const baseKeys = new Set(base.map(listIndexKey));
+    const upstreamKeys = new Set(upstream.map(listIndexKey));
+    const localKeys = new Set(local.map(listIndexKey));
+
+    return insertMissingListItems(local, upstream).filter((slug) => {
+        const key = listIndexKey(slug);
+        const wasInBase = baseKeys.has(key);
+        const deletedOnOneSide = !upstreamKeys.has(key) || !localKeys.has(key);
+
+        if (!wasInBase || !deletedOnOneSide) {
+            return true;
+        }
+
+        return fsSync.existsSync(safeDataPath(`${slug}.json`));
+    });
+}
+
+async function readJsonConflictStage(relativePath, stage) {
+    try {
+        const result = await git(["show", `:${stage}:${relativePath}`], 30000);
+        return JSON.parse(result.stdout);
+    } catch (error) {
+        if (stage === 1) {
+            return [];
+        }
+        throw new Error(
+            `Could not read ${relativePath} conflict stage ${stage}: ${error.message}`,
+        );
+    }
+}
+
+async function resolveListIndexConflicts() {
+    const conflicts = await git([
+        "diff",
+        "--name-only",
+        "--diff-filter=U",
+        "--",
+        "data/_list.json",
+        "data/list.json",
+    ]);
+    const files = conflicts.stdout
+        ? conflicts.stdout.split(/\r?\n/).filter(Boolean)
+        : [];
+    const resolved = [];
+
+    for (const relativePath of files) {
+        const fileName = path.basename(relativePath);
+        const base = await readJsonConflictStage(relativePath, 1);
+        const upstream = await readJsonConflictStage(relativePath, 2);
+        const local = await readJsonConflictStage(relativePath, 3);
+        const merged = mergeListIndexes(base, upstream, local);
+        await writeJson(safeDataPath(fileName), merged);
+        await git(["add", "--", relativePath]);
+        resolved.push(relativePath);
+    }
+
+    return resolved;
+}
+
+async function rebaseWithAutoListMerge(gitInfo) {
+    const upstream = gitInfo.upstream || `origin/${gitInfo.branch}`;
+    const output = [];
+
+    const fetch = await git(["fetch", "origin"], 300000);
+    output.push(outputFromResult(fetch));
+
+    try {
+        const rebase = await git(["rebase", upstream], 300000);
+        output.push(outputFromResult(rebase) || "Already up to date after fetch.");
+    } catch (error) {
+        output.push(commandErrorOutput(error));
+        const resolved = await resolveListIndexConflicts();
+        if (!resolved.length) {
+            throw error;
+        }
+
+        const remaining = await git(["diff", "--name-only", "--diff-filter=U"]);
+        if (remaining.stdout) {
+            throw new Error(
+                [
+                    `Auto-resolved ${resolved.join(", ")}, but other conflicts still need a person:`,
+                    remaining.stdout,
+                ].join("\n"),
+            );
+        }
+
+        const continued = await git(
+            ["-c", "core.editor=true", "rebase", "--continue"],
+            300000,
+        );
+        output.push(
+            `Auto-resolved ${resolved.join(", ")} by merging both list indexes.`,
+        );
+        output.push(outputFromResult(continued));
+    }
+
+    return output.filter(Boolean).join("\n");
+}
+
+function isPushBehindError(text) {
+    return /non-fast-forward|fetch first|failed to push some refs|tip of your current branch is behind|Updates were rejected/i.test(
+        text,
+    );
+}
+
+function isFastForwardOnlyPullError(text) {
+    return /Not possible to fast-forward|divergent branches|Need to specify how to reconcile/i.test(
+        text,
+    );
+}async function pullLatestForSelectedRepo(leadingOutput) {
     try {
         const pulled = await pullRepo();
         return {
@@ -912,12 +1096,11 @@ async function pushRepo() {
     }
 
     let result;
+    let syncOutput = "";
     try {
         result = await git(["push"], 300000);
     } catch (error) {
-        const text = [error.result?.stdout, error.result?.stderr, error.message]
-            .filter(Boolean)
-            .join("\n");
+        const text = commandErrorOutput(error);
         if (
             /no upstream branch|set the remote as upstream|has no upstream/i.test(
                 text,
@@ -927,6 +1110,9 @@ async function pushRepo() {
                 ["push", "--set-upstream", "origin", gitInfo.branch],
                 300000,
             );
+        } else if (isPushBehindError(text)) {
+            syncOutput = await rebaseWithAutoListMerge(gitInfo);
+            result = await git(["push"], 300000);
         } else {
             throw error;
         }
@@ -934,7 +1120,7 @@ async function pushRepo() {
 
     return {
         pushed: true,
-        output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+        output: [syncOutput, outputFromResult(result)].filter(Boolean).join("\n"),
         git: await getGitInfo(),
         github: await getGithubInfo(),
     };
@@ -958,13 +1144,22 @@ async function pullRepo() {
         );
     }
 
-    const pull = await git(["pull", "--ff-only"], 300000);
+    let output = "";
+    try {
+        const pull = await git(["pull", "--ff-only"], 300000);
+        output = outputFromResult(pull) || "Already up to date.";
+    } catch (error) {
+        const text = commandErrorOutput(error);
+        if (!isFastForwardOnlyPullError(text)) {
+            throw error;
+        }
+        output = await rebaseWithAutoListMerge(gitInfo);
+    }
+
     return {
         ...(await readState()),
         pulled: true,
-        output:
-            [pull.stdout, pull.stderr].filter(Boolean).join("\n") ||
-            "Already up to date.",
+        output,
     };
 }
 
