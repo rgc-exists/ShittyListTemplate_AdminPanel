@@ -884,14 +884,16 @@ async function selectRepo() {
         method: "POST",
         body: JSON.stringify({ repoRoot }),
     });
+    const output = fresh.output || "";
     applyState(fresh);
     state.dirty = false;
     state.deletedSlugs.clear();
     setNotice(
-        state.repoError
-            ? "Repo selected, but list data needs attention."
-            : "Repo selected.",
-        state.repoError ? "error" : "success",
+        output ||
+            (state.repoError
+                ? "Repo selected, but list data needs attention."
+                : "Repo selected."),
+        fresh.pullError || state.repoError ? "error" : "success",
     );
     render();
 }
@@ -922,7 +924,10 @@ async function cloneRepo() {
     applyState(fresh);
     state.dirty = false;
     state.deletedSlugs.clear();
-    setNotice(output || "Repo ready.", state.repoError ? "error" : "success");
+    setNotice(
+        output || "Repo ready.",
+        fresh.pullError || state.repoError ? "error" : "success",
+    );
     render();
 }
 

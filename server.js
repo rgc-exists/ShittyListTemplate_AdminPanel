@@ -681,6 +681,40 @@ async function commitData(body) {
     };
 }
 
+function commandErrorOutput(error) {
+    const result = error && error.result ? error.result : {};
+    return [
+        error && error.message ? error.message : "",
+        result.stdout || "",
+        result.stderr || "",
+    ]
+        .filter(Boolean)
+        .join("\n");
+}
+
+async function pullLatestForSelectedRepo(leadingOutput) {
+    try {
+        const pulled = await pullRepo();
+        return {
+            ...pulled,
+            output: [
+                leadingOutput,
+                `Checked for latest changes. ${pulled.output || "Already up to date."}`,
+            ]
+                .filter(Boolean)
+                .join("\n"),
+        };
+    } catch (error) {
+        const pullError = commandErrorOutput(error);
+        return {
+            ...(await readState()),
+            pullError,
+            output: [leadingOutput, `Pull failed: ${pullError}`]
+                .filter(Boolean)
+                .join("\n"),
+        };
+    }
+}
 async function selectRepo(body) {
     const nextRepoRoot = String(
         body && body.repoRoot ? body.repoRoot : "",
@@ -690,7 +724,7 @@ async function selectRepo(body) {
     }
 
     setRepoRoot(nextRepoRoot);
-    return readState();
+    return pullLatestForSelectedRepo(`Repo selected: ${repoRoot}`);
 }
 
 function serializeLoginJob(job) {
@@ -833,10 +867,9 @@ async function cloneRepo(body) {
         const entries = await fs.readdir(target).catch(() => []);
         if (entries.length > 0) {
             setRepoRoot(target);
-            return {
-                ...(await readState()),
-                output: `Local folder already exists, so the panel selected it instead of cloning: ${target}`,
-            };
+            return pullLatestForSelectedRepo(
+                `Local folder already exists, so the panel selected it instead of cloning: ${target}`,
+            );
         }
     }
 
@@ -854,10 +887,10 @@ async function cloneRepo(body) {
     }
 
     setRepoRoot(target);
-    return {
-        ...(await readState()),
-        output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
-    };
+    return pullLatestForSelectedRepo(
+        [result.stdout, result.stderr].filter(Boolean).join("\n") ||
+            `Cloned ${repo.ref} into ${target}.`,
+    );
 }
 
 async function pushRepo() {
